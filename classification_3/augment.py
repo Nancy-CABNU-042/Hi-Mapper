@@ -6,18 +6,18 @@
 Data-augmentation (DA) based on dino DA (https://github.com/facebookresearch/dino)
 and timm DA(https://github.com/rwightman/pytorch-image-models)
 """
-import torch
-from torchvision import transforms
-
-from timm.data.transforms import _pil_interp, RandomResizedCropAndInterpolation, ToNumpy, ToTensor
-
-import numpy as np
-from torchvision import datasets, transforms
 import random
 
-
-
+import numpy as np
+import torch
 from PIL import ImageFilter, ImageOps
+from torchvision import datasets, transforms
+
+try:
+    from timm.data.transforms import RandomResizedCropAndInterpolation
+except ImportError:  # timm<0.9 fallback
+    from timm.data.transforms_factory import RandomResizedCropAndInterpolation
+
 import torchvision.transforms.functional as TF
 
 

@@ -104,46 +104,75 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,
-                    set_training_mode=True, args = None):
+                    set_training_mode=True, args=None):
+    def _accumulate_auxiliary_losses(values):
+        """Recursively sum scalar tensor losses from auxiliary outputs."""
+        if values is None:
+            return None
+        if isinstance(values, torch.Tensor):
+            if values.ndim == 0 or values.numel() == 1:
+                return values
+            return None
+        if isinstance(values, (list, tuple)):
+            total = None
+            for value in values:
+                nested = _accumulate_auxiliary_losses(value)
+                if nested is not None:
+                    total = nested if total is None else total + nested
+            return total
+        return None
+
     model.train(set_training_mode)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
-    
-    if args.cosub:
+
+    cosub_enabled = bool(getattr(args, 'cosub', False))
+    bce_targets = bool(getattr(args, 'bce_loss', False))
+
+    if cosub_enabled:
         criterion = torch.nn.BCEWithLogitsLoss()
-        
+
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
-            
-        if args.cosub:
-            samples = torch.cat((samples,samples),dim=0)
-            
-        if args.bce_loss:
+
+        if cosub_enabled:
+            samples = torch.cat((samples, samples), dim=0)
+
+        if bce_targets:
             targets = targets.gt(0.0).type(targets.dtype)
-         
-        with torch.cuda.amp.autocast():
-            outputs, _, col_loss, hyp_loss = model(samples)
-            # outputs = x[:,0]
-            # vismap = x[:,1:]
-            if not args.cosub:
-                loss = criterion(samples, outputs, targets)
-                print("cls loss : {}".format(loss))
-                # loss += sum(hyp_loss[1])
-                loss += hyp_loss[1]
-                loss += col_loss
-                # loss += 1 - torch.mean(F.cosine_similarity(outputs, x_ori))
-            else:
-                outputs = torch.split(outputs, outputs.shape[0]//2, dim=0)
-                loss = 0.25 * criterion(outputs[0], targets) 
-                loss = loss + 0.25 * criterion(outputs[1], targets) 
-                loss = loss + 0.25 * criterion(outputs[0], outputs[1].detach().sigmoid())
-                loss = loss + 0.25 * criterion(outputs[1], outputs[0].detach().sigmoid()) 
+
+        with torch.cuda.amp.autocast(enabled=False):
+            outputs = model(samples)
+
+        if isinstance(outputs, (list, tuple)):
+            logits = outputs[0]
+            aux_outputs = outputs[1:]
+        else:
+            logits = outputs
+            aux_outputs = ()
+
+        if cosub_enabled:
+            chunks = torch.split(logits, logits.shape[0] // 2, dim=0)
+            loss = 0.0
+            loss = loss + 0.25 * criterion(chunks[0], targets)
+            loss = loss + 0.25 * criterion(chunks[1], targets)
+            loss = loss + 0.25 * criterion(chunks[0], chunks[1].detach().sigmoid())
+            loss = loss + 0.25 * criterion(chunks[1], chunks[0].detach().sigmoid())
+        else:
+            try:
+                loss = criterion(logits, targets)
+            except TypeError:
+                loss = criterion(samples, logits, targets)
+
+        aux_loss = _accumulate_auxiliary_losses(aux_outputs)
+        if aux_loss is not None:
+            loss = loss + aux_loss
 
         loss_value = loss.item()
 
@@ -164,6 +193,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
