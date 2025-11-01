@@ -23,9 +23,6 @@ from losses import DistillationLoss
 from samplers import RASampler
 from augment import new_data_aug_generator
 
-import models
-import models_v2
-
 import utils
 
 
@@ -269,6 +266,7 @@ def main(args):
         drop_block_rate=None,
         img_size=args.input_size
     )
+    model.to(device)
 
                     
     if args.finetune:
@@ -306,64 +304,25 @@ def main(args):
         checkpoint_model['pos_embed'] = new_pos_embed
 
         model.load_state_dict(checkpoint_model, strict=False)
-    for name_p, p in model.named_parameters():
-        if 'last_l.' in name_p:
-            p.requires_grad = True
-            # print(name_p, ":" ,p.requires_grad)
-        elif 'mix_l.' in name_p:
-            p.requires_grad = True
-            # print(name_p, ":" ,p.requires_grad)
-        elif '.attn.' in name_p:
-            p.requires_grad = True
-        else:
-            p.requires_grad = True
-    try:
-        model.head.weight.requires_grad = True
-        model.head.bias.requires_grad = True
-    except:
-        model.fc.weight.requires_grad = True
-        model.fc.bias.requires_grad = True
-    # try:
-    #     model.pos_embed.requires_grad = True
-    # except:
-    #     print('no position encoding')
-    try:
-        for p in model.patch_embed.parameters():
-            p.requires_grad = False
-    except:
-        print('no patch embed')
-    
-    model.last_l.requires_grad = True
-            
+    head_module = getattr(model, 'head', None)
+    fc_module = getattr(model, 'fc', None)
+    if head_module is not None and hasattr(head_module, 'weight') and hasattr(head_module, 'bias'):
+        head_module.weight.requires_grad = True
+        head_module.bias.requires_grad = True
+    elif fc_module is not None and hasattr(fc_module, 'weight') and hasattr(fc_module, 'bias'):
+        fc_module.weight.requires_grad = True
+        fc_module.bias.requires_grad = True
+
     if args.attn_only:
-        for name_p,p in model.named_parameters():
-            print(name_p)
-            if '.attn.' in name_p:
-                
-                p.requires_grad = True
-            elif '.last_l.' in name_p:
-                
-                p.requires_grad = True
-            else:
-                p.requires_grad = False
-        try:
-            model.head.weight.requires_grad = True
-            model.head.bias.requires_grad = True
-        except:
-            model.fc.weight.requires_grad = True
-            model.fc.bias.requires_grad = True
-        try:
-            model.pos_embed.requires_grad = True
-        except:
-            print('no position encoding')
-        try:
-            for p in model.patch_embed.parameters():
-                p.requires_grad = False
-        except:
-            print('no patch embed')
-        model.last_l.requires_grad = True
-            
-    model.to(device)
+        for name_p, p in model.named_parameters():
+            requires_grad = '.attn.' in name_p
+            if name_p.startswith('head.') or name_p.startswith('fc.'):
+                requires_grad = True
+            p.requires_grad = requires_grad
+        patch_embed = getattr(model, 'patch_embed', None)
+        if patch_embed is not None:
+            for param in patch_embed.parameters():
+                param.requires_grad = False
 
     model_ema = None
     if args.model_ema:
